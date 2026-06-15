@@ -1,5 +1,23 @@
 #include <xc.inc>
 
+; ==============================================================
+; Fichier  : tx.asm
+; Projet   : VU-mètre 4 bandes — JUNIA AP3 BX 2023-2024
+; MCU      : PIC18F25K40 @ 64 MHz  (1 cycle instruction = 62,5 ns)
+; Fonction : _TX_64LEDS — envoi de 256 octets (64 LEDs GRBW)
+;            vers la matrice SK6812RGBW sur la broche RB0.
+;
+; Protocole SK6812RGBW (conforme sujet §VI) :
+;   Bit '0' : T_haut ≈ 0,32 µs  |  T_bas ≈ 0,93 µs  |  période 1,25 µs
+;   Bit '1' : T_haut ≈ 0,82 µs  |  T_bas ≈ 0,43 µs  |  période 1,25 µs
+;   Tolérance ±150 ns — VÉRIFIER À L'OSCILLOSCOPE et ajuster les NOP.
+;
+; Comptage cycles à 62,5 ns/cycle :
+;   Bit '0' HIGH : BSF(1) + BTFSC skip(2) + NOP(1) + BCF(1) = 5 cy = 312,5 ns ✓
+;   Bit '1' HIGH : BSF(1) + BTFSC(1) + BRA(2) + 5×NOP + BCF(1) = 10 cy = 625 ns
+;                  → légèrement court (cible 820 ns) : ajouter des NOP si nécessaire
+; ==============================================================
+
 ; Déclaration des variables temporaires pour les boucles en assembleur
 psect   udata_acs
 byte_ctr: ds 1    ; Compteur d'octets (256)
