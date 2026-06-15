@@ -1,69 +1,129 @@
 /* --------------------------------------------------------------
  * Fichier     :   main.c
- * Auteur(s)   :
- * Description :
+ * Description :   VU-mètre complet sur Matrice de 64 LEDs (RB4)
  * -------------------------------------------------------------- */
 
 #include <xc.h>
 
-// Configuration materielle du PIC :
-#pragma config FEXTOSC = OFF           // Pas de source d'horloge externe
-#pragma config RSTOSC = HFINTOSC_64MHZ // Horloge interne de 64 MHz
-#pragma config WDTE = OFF              // Désactiver le watchdog
+#pragma config FEXTOSC = OFF
+#pragma config RSTOSC = HFINTOSC_64MHZ
+#pragma config WDTE = OFF
 
-#define _XTAL_FREQ 64000000 // Frequence d'horloge - necessaire aux macros de delay (_delay(N) ; __delay_us(N) ; __delay_ms(N)))
+#define _XTAL_FREQ 64000000
 
-// Définition des masques, macros, etc. :
-// TODO
+// Variables partagées avec l'assembleur
+volatile char LED_MATRIX [256];
+volatile const char * pC = LED_MATRIX;
+extern void TX_64LEDS(void);
 
+// Vos paramètres de calibrage validés précédemment
+#define SEUIL_BRUIT    520
+#define ADC_MAX_REEL   1023
 
-// Déclaration de fonctions et variables globales permettant au code C et à l'asm de les partager
-// Une même fonction ou variable côté asm est préfixée par un underscore, et ne l'est pas côté C
-// Avec ce formalisme, elles sont utilisables de façon intercangeable et transparente :
-// | ---- asm ----- | ------------- C ----------------- |
-// | _TX_64LEDS  <--|--> void TX_64LEDS(void)           |
-// | _pC         <--|--> volatile const char * pC       |
-// | _LED_MATRIX <--|--> volatile char LED_MATRIX [256] |
+void ADC_Init(void) {
+    TRISA |= 0x01;
+    ANSELA |= 0x01;
+    ADPCH = 0x00;
+    ADCLK = 0x1F;
+    ADCON0bits.ADFM = 1;
+    ADCON0bits.ADCS = 0;
+    ADCON0bits.ADON = 1;
+}
 
-// Définition des fonctions relatives à la matrice de LEDs:
-extern void TX_64LEDS(void); // Fonction définie dans tx.asm ; Fonction permettant d'envoyer la commande pour piloter les 64 LEDs, telle que décrite dans LED_MATRIX
+unsigned int ADC_Read(void) {
+    ADCON0bits.GO = 1;
+    while(ADCON0bits.GO);
+    return (unsigned int)((ADRESH << 8) | ADRESL);
+}
 
-// Définition des constantes / variables relatives à la matrice de LEDs :
-volatile char LED_MATRIX [256] ; // Definition d'une matrice de 64 x 4 octets contenant les composantes R/G/B/W de chaque LED (1 octet/couleur/LED)
-volatile const char * pC = LED_MATRIX; // Pointeur vers LED_MATRIX
-
-
-// - Fonction main ----------------------------------------------------------------------
 void main(void) {
-    /* Configuration des entrées / sorties */
-    // TODO
+    /* Initialisations */
+    ADC_Init();
 
-    /* Corps du programme */
-    // TODO
+    // Configuration de la broche RB4 (Sortie numérique pour la Matrice)
+    ANSELB &= ~0x10; // Désactive l'analogique sur RB4
+    TRISB &= ~0x10;  // RB4 en sortie
+    LATB &= ~0x10;   // RB4 à 0 au départ
 
-    /* Code pour vérification du bon fonctionnement de la partir uC (à retirer par la suite) : === DEMO CODE */
+    unsigned long volume_lisse = 0;
+    int nb_leds_prec = 0;
+    unsigned int plage_utile = ADC_MAX_REEL - SEUIL_BRUIT;
 
-    // Initialisation des LEDs =================================================================== DEMO CODE
-    TRISB &= 0xEF; // LED_MASTER : OUTPUT -------------------------------------------------------- DEMO CODE
-    TRISC &= 0x00; // LED0-7     : OUTPUT -------------------------------------------------------- DEMO CODE
+    while(1) {
+        unsigned int volume_max = 0;
 
-    LATB &= 0xEF; // Eteindre LEDM   ------------------------------------------------------------- DEMO CODE
-    LATC  = 0x00; // Eteindre LED0-7 ------------------------------------------------------------- DEMO CODE
+        // 1. Fenêtre de capture (60 mesures flash pour capturer les basses)
+        for (int i = 0; i < 60; i++) {
+            unsigned int mesure = ADC_Read();
+            if (mesure > volume_max) {
+                volume_max = mesure;
+            }
+            __delay_us(80);
+        }
 
-    // Blink sur LEDM : ========================================================================== DEMO CODE
-    LATB |= 0x10;    // Allumer LEDM   ----------------------------------------------------------- DEMO CODE
-    __delay_ms(500); // Macro de délai ----------------------------------------------------------- DEMO CODE
-    LATB &= 0xEF;    // Eteindre LEDM  ----------------------------------------------------------- DEMO CODE
-    __delay_ms(500); // Macro de délai ----------------------------------------------------------- DEMO CODE
-    LATB |= 0x10;    // Allumer LEDM   ----------------------------------------------------------- DEMO CODE
+        // 2. Filtre anti-bruit
+        if (volume_max <= SEUIL_BRUIT) {
+            volume_max = 0;
+        } else {
+            volume_max = volume_max - SEUIL_BRUIT;
+        }
 
-    // Chenillard : ============================================================================== DEMO CODE
-    while(1){ //---------------------------------------------------------------------------------- DEMO CODE
-        for (int i=0; i<8; i++){ // -------------------------------------------------------------- DEMO CODE
-            LATC = 0x01 << i;    // Commander les LEDs de test sur le PORTC ---------------------- DEMO CODE
-            __delay_ms(125);     // Macro de délai ----------------------------------------------- DEMO CODE
-        } // ------------------------------------------------------------------------------------- DEMO CODE
-    } // ----------------------------------------------------------------------------------------- DEMO CODE
+        // 3. Lissage par moyenne glissante
+        volume_lisse = ((volume_lisse * 11) + volume_max) / 12;
 
-    return;
+        // 4. Calcul du nombre de LEDs sur l'échelle de 64 (avec arrondi parfait)
+        int nb_leds_cible = (int)(((volume_lisse * 64) + (plage_utile / 2)) / plage_utile);
+
+        if (nb_leds_cible > 64) {
+            nb_leds_cible = 64;
+        }
+
+        // 5. Inertie de descente fluide
+        if (nb_leds_cible >= nb_leds_prec) {
+            nb_leds_prec = nb_leds_cible;
+        } else {
+            nb_leds_prec--;
+        }
+
+        // 6. Remplissage du tableau LED_MATRIX (G, R, B, W)
+        for (int i = 0; i < 64; i++) {
+            int index = i * 4;
+
+            if (i < nb_leds_prec) {
+                // Dégradé de couleur selon la position de la LED (i)
+                if (i < 30) {
+                    // Les 30 premières LEDs : VERT
+                    LED_MATRIX[index + 0] = 0x15; // Vert
+                    LED_MATRIX[index + 1] = 0x00; // Rouge
+                    LED_MATRIX[index + 2] = 0x00; // Bleu
+                }
+                else if (i < 50) {
+                    // De 30 à 50 : ORANGE (Vert + Rouge)
+                    LED_MATRIX[index + 0] = 0x0B; // Vert moyen
+                    LED_MATRIX[index + 1] = 0x15; // Rouge
+                    LED_MATRIX[index + 2] = 0x00; // Bleu
+                }
+                else {
+                    // Les 14 dernières : ROUGE complet
+                    LED_MATRIX[index + 0] = 0x00; // Vert
+                    LED_MATRIX[index + 1] = 0x20; // Rouge brillant
+                    LED_MATRIX[index + 2] = 0x00; // Bleu
+                }
+                LED_MATRIX[index + 3] = 0x00;     // Blanc éteint
+            }
+            else {
+                // LED doit être éteinte
+                LED_MATRIX[index + 0] = 0x00;
+                LED_MATRIX[index + 1] = 0x00;
+                LED_MATRIX[index + 2] = 0x00;
+                LED_MATRIX[index + 3] = 0x00;
+            }
+        }
+
+        // 7. Envoi physique des données à la matrice
+        TX_64LEDS();
+
+        // Pause de rafraîchissement
+        __delay_ms(8);
+    }
 }
