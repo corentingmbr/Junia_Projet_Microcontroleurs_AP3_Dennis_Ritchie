@@ -1,42 +1,68 @@
 #include <xc.inc>
 
-; When assembly code is placed in a psect, it can be manipulated as a
-; whole by the linker and placed in memory.
-psect   txfunc,local,class=CODE,reloc=2 ; PIC18's should have a reloc (alignment) flag of 2 for any psect which contains executable code.
+; Déclaration des variables temporaires pour les boucles en assembleur
+psect   udata_acs
+byte_ctr: ds 1    ; Compteur d'octets (256)
+bit_ctr:  ds 1    ; Compteur de bits (8)
+data_reg: ds 1    ; Sauvegarde de l'octet en cours de traitement
 
-; -----------------------------------------------------------------
-; GLOBALS
-;
-; Déclaration de fonctions et variables globales permettant au code C et à l'asm de les partager
-; Une même fonction ou variable côté asm est préfixée par un underscore, et ne l'est pas côté C
-; Avec ce formalisme, elles sont utilisables de façon intercangeable et transparente :
-; | ---- asm ----- | ------------- C ----------------- |
-; | _TX_64LEDS  <--|--> void TX_64LEDS(void)           |
-; | _pC         <--|--> volatile const char * pC       |
-; | _LED_MATRIX <--|--> volatile char LED_MATRIX [256] |
+psect   txfunc,local,class=CODE,reloc=2
 
-; Fonction globales
-global _TX_64LEDS ; Fonction définie dans tx.asm ; Fonction permettant d'envoyer la commande pour piloter les 64 LEDs, telle que décrite dans LED_MATRIX
-
-; Constantes/variables globales
-global _pC         ; Constante définie dans main.c ; Pointeur vers LED_MATRIX
-global _LED_MATRIX ; Variable  définie dans main.c ; Tableau (256 octets = 64 x 4) des composantes RGBW de la matrice LED (1 octet/couleur/LED)
+global _TX_64LEDS
+global _pC
+global _LED_MATRIX
 
 _TX_64LEDS:
-    ; Cette fonction envoie sur CMD_MATRIX l'intégralité de la matrice LED_MATRIX,
-    ; Chaque bit de chaque octet encodé en largeur d'impulsion
+    ; Initialisation du pointeur FSR0 au début de la matrice
+    MOVFF _pC + 0, FSR0L
+    MOVFF _pC + 1, FSR0H
 
-    ; Place un pointeur au début de la matrice LED_MATRIX
-    ; Voir section 10.8.12 (p. 150) de la datasheet PIC18F25K40
-    MOVFF _pC + 0, WREG ; Charge le LSB du pointeur de LED_MATRIX dans WREG
-    MOVWF FSR0L, 0      ; Définit le LSB du registre d'adressage indirect
-    MOVFF _pC + 1, WREG ; Charge le MSB du pointeur de LED_MATRIX dans WREG
-    MOVWF FSR0H, 0      ; Définit le MSB du registre d'adressage indirect
+    CLRF byte_ctr, 1          ; Initialise le compteur à 0 (tournera 256 fois par overflow)
 
-    ; Désormais, dès l'exécution de l'instruction suivante, la valeur pointée par <FSR0H-FSR0L> est chargée dans WREG, et <FSR0H-FSR0L> est incrémenté :
-    ; MOVF POSTINC0, 0, 0
+byte_loop:
+    MOVF POSTINC0, 0, 0       ; Charge l'octet pointé dans WREG et incrémente le pointeur
+    MOVWF data_reg, 1         ; Sauvegarde l'octet dans notre registre de travail
+    MOVLW 8
+    MOVWF bit_ctr, 1          ; Initialise le compteur à 8 bits
 
-    ; Envoie la commande pour piloter chacune des 64 LEDs
-    ; TODO
+bit_loop:
+    BSF LATB, 0, 0            ; ----> FORCE LA BROCHE RB0 À 1 (Début de l'impulsion)
+
+    ; Test du bit de poids fort (MSB)
+    BTFSC data_reg, 7, 1      ; Si le bit 7 est à 0, on saute à l'étiquette bit_zero
+    BRA bit_one
+
+bit_zero:
+    ; Timing pour un '0' : Temps haut très court (~300ns), puis temps bas (~900ns)
+    NOP                       ; Ajustement du timing haut
+    BCF LATB, 0, 0            ; ----> REPASSE LA BROCHE RB0 À 0
+
+    ; Pendant le temps bas, on prépare le bit suivant
+    RLCF data_reg, 1, 1       ; Décalage à gauche pour analyser le bit suivant au prochain tour
+    NOP
+    NOP
+    NOP
+    BRA next_bit              ; Saute vers la fin de la boucle du bit
+
+bit_one:
+    ; Timing pour un '1' : Temps haut plus long (~600ns), puis temps bas (~600ns)
+    NOP
+    NOP
+    NOP
+    NOP
+    NOP
+    BCF LATB, 0, 0            ; ----> REPASSE LA BROCHE RB0 À 0
+
+    ; Temps bas pour le '1'
+    RLCF data_reg, 1, 1       ; Décalage à gauche pour le bit suivant
+    NOP
+    NOP
+
+next_bit:
+    DECFSZ bit_ctr, 1, 1      ; Décrémente le compteur de bits, saute si zéro
+    BRA bit_loop              ; Si pas zéro, on traite le bit suivant
+
+    DECFSZ byte_ctr, 1, 1     ; Décrémente le compteur d'octets
+    BRA byte_loop             ; Si pas zéro, on traite l'octet suivant
 
     RETURN
