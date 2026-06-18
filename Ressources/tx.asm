@@ -1,28 +1,7 @@
 #include <xc.inc>
 
-; ==============================================================
-; Fichier  : tx.asm
-; Projet   : VU-mètre 4 bandes — JUNIA AP3 BX 2023-2024
-; MCU      : PIC18F25K40 @ 64 MHz  (1 cycle instruction = 62,5 ns)
-; Fonction : _TX_64LEDS — envoi de 256 octets (64 LEDs GRBW)
-;            vers la matrice SK6812RGBW sur la broche RB0.
-;
-; Protocole SK6812RGBW (conforme sujet §VI) :
-;   Bit '0' : T_haut ≈ 0,32 µs  |  T_bas ≈ 0,93 µs  |  période 1,25 µs
-;   Bit '1' : T_haut ≈ 0,82 µs  |  T_bas ≈ 0,43 µs  |  période 1,25 µs
-;   Tolérance ±150 ns — VÉRIFIER À L'OSCILLOSCOPE et ajuster les NOP.
-;
-; Comptage cycles à 62,5 ns/cycle :
-;   Bit '0' HIGH : BSF(1) + BTFSC skip(2) + NOP(1) + BCF(1) = 5 cy = 312,5 ns ✓
-;   Bit '1' HIGH : BSF(1) + BTFSC(1) + BRA(2) + 5×NOP + BCF(1) = 10 cy = 625 ns
-;                  → légèrement court (cible 820 ns) : ajouter des NOP si nécessaire
-; ==============================================================
-
-; Déclaration des variables temporaires pour les boucles en assembleur
-psect   udata_acs
-byte_ctr: ds 1    ; Compteur d'octets (256)
-bit_ctr:  ds 1    ; Compteur de bits (8)
-data_reg: ds 1    ; Sauvegarde de l'octet en cours de traitement
+; NOTE : On a supprimé la section 'psect udata_acs'
+; On utilise les registres physiques du PIC (FSR1 et TABLAT) comme variables de rechange
 
 psect   txfunc,local,class=CODE,reloc=2
 
@@ -31,56 +10,63 @@ global _pC
 global _LED_MATRIX
 
 _TX_64LEDS:
-    ; Initialisation du pointeur FSR0 au début de la matrice
-    MOVFF _pC + 0, FSR0L
-    MOVFF _pC + 1, FSR0H
+    ; Récupération du pointeur vers la matrice
+    MOVFF _pC + 0, WREG
+    MOVWF FSR0L, 0
+    MOVFF _pC + 1, WREG
+    MOVWF FSR0H, 0
 
-    CLRF byte_ctr, 1          ; Initialise le compteur à 0 (tournera 256 fois par overflow)
+    ; On utilise FSR1L à la place de 'byte_ctr'
+    CLRF FSR1L, 0
 
 byte_loop:
-    MOVF POSTINC0, 0, 0       ; Charge l'octet pointé dans WREG et incrémente le pointeur
-    MOVWF data_reg, 1         ; Sauvegarde l'octet dans notre registre de travail
+    MOVF POSTINC0, 0, 0       ; Charge l'octet de la matrice dans WREG et avance
+
+    ; On utilise TABLAT à la place de 'data_reg'
+    MOVWF TABLAT, 0
+
+    ; On utilise FSR1H à la place de 'bit_ctr'
     MOVLW 8
-    MOVWF bit_ctr, 1          ; Initialise le compteur à 8 bits
+    MOVWF FSR1H, 0
 
 bit_loop:
-    BSF LATB, 0, 0            ; ----> FORCE LA BROCHE RB0 À 1 (Début de l'impulsion)
+    ; ON MET TOUT LE PORTB A 1 !!!
+    MOVLW 0xFF
+    MOVWF LATB, 0
 
-    ; Test du bit de poids fort (MSB)
-    BTFSC data_reg, 7, 1      ; Si le bit 7 est à 0, on saute à l'étiquette bit_zero
+    ; Test du bit 7 (le MSB) dans TABLAT
+    BTFSC TABLAT, 7, 0
     BRA bit_one
 
 bit_zero:
-    ; Timing pour un '0' : Temps haut très court (~300ns), puis temps bas (~900ns)
-    NOP                       ; Ajustement du timing haut
-    BCF LATB, 0, 0            ; ----> REPASSE LA BROCHE RB0 À 0
+    ; ON MET TOUT LE PORTB A 0 !!!!!
+    MOVLW 0x00
+    MOVWF LATB, 0
 
-    ; Pendant le temps bas, on prépare le bit suivant
-    RLCF data_reg, 1, 1       ; Décalage à gauche pour analyser le bit suivant au prochain tour
+    RLCF TABLAT, 1, 0       ; Décalage du bit suivant dans TABLAT
     NOP
     NOP
-    NOP
-    BRA next_bit              ; Saute vers la fin de la boucle du bit
+    BRA next_bit
 
 bit_one:
-    ; Timing pour un '1' : Temps haut plus long (~600ns), puis temps bas (~600ns)
+    ; on met tout le PORTB à 0
     NOP
     NOP
     NOP
-    NOP
-    NOP
-    BCF LATB, 0, 0            ; ----> REPASSE LA BROCHE RB0 À 0
+    MOVLW 0x00
+    MOVWF LATB, 0
 
-    ; Temps bas pour le '1'
-    RLCF data_reg, 1, 1       ; Décalage à gauche pour le bit suivant
+    RLCF TABLAT, 1, 0
     NOP
     NOP
 
 next_bit:
-    DECFSZ bit_ctr, 1, 1      ; Décrémente le compteur de bits, saute si zéro
-    BRA bit_loop              ; Si pas zéro, on traite le bit suivant
+    ; Décrémente le compteur de bits FSR1H
+    DECFSZ FSR1H, 1, 0
+    BRA bit_loop
 
-    DECFSZ byte_ctr, 1, 1     ; Décrémente le compteur d'octets
-    BRA byte_loop             ; Si pas zéro, on traite l'octet suivant
+    ; Décrémente le compteur d'octets FSR1L
+    DECFSZ FSR1L, 1, 0
+    BRA byte_loop
 
     RETURN
